@@ -52,4 +52,30 @@ defmodule FuelWeb.FuelLiveTest do
     assert html =~ "must be a positive number"
     assert has_element?(view, "#total", "—")
   end
+
+  test "reports overflowing mass instead of crashing", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    add_steps(view, 1)
+
+    html =
+      view
+      |> form("#flight", mass: "1e308", steps: %{"0" => %{action: "launch", planet: "earth"}})
+      |> render_change()
+
+    assert html =~ "is too large"
+    assert has_element?(view, "#total", "—")
+  end
+
+  test "survives malformed event payloads", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+    add_steps(view, 1)
+
+    render_hook(view, "change", %{"mass" => 5, "steps" => %{"x" => 1, "0" => "bad"}})
+    render_hook(view, "change", %{"steps" => [1, 2]})
+    render_hook(view, "remove", %{"index" => "abc"})
+    render_hook(view, "remove", %{})
+    render_hook(view, "unknown", %{})
+
+    assert has_element?(view, "#total", "—")
+  end
 end
