@@ -7,9 +7,16 @@ defmodule FuelWeb.FuelLive do
 
   alias Fuel.Calculator
 
+  # Bounds client input; at these limits the worst-case fuel stays ~1e29, far from float overflow.
+  @max_mass 1_000_000_000
+  @max_steps 100
+
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, socket |> assign(mass: "", steps: []) |> calculate()}
+    {:ok,
+     socket
+     |> assign(mass: "", steps: [], max_mass: @max_mass, max_steps: @max_steps)
+     |> calculate()}
   end
 
   @impl true
@@ -21,6 +28,7 @@ defmodule FuelWeb.FuelLive do
             {i, %{"action" => field(step, "action"), "planet" => field(step, "planet")}}
           end
           |> Enum.sort()
+          |> Enum.take(@max_steps)
           |> Enum.map(fn {_, step} -> step end)
 
         _ ->
@@ -30,7 +38,7 @@ defmodule FuelWeb.FuelLive do
     {:noreply, socket |> assign(mass: field(params, "mass"), steps: steps) |> calculate()}
   end
 
-  def handle_event("add", _params, socket) do
+  def handle_event("add", _params, socket) when length(socket.assigns.steps) < @max_steps do
     steps = socket.assigns.steps ++ [%{"action" => "", "planet" => ""}]
     {:noreply, socket |> assign(steps: steps) |> calculate()}
   end
@@ -74,33 +82,18 @@ defmodule FuelWeb.FuelLive do
           nil
       end
 
-    mass =
+    {mass, mass_errors} =
       case Float.parse(mass) do
-        {mass, ""} when mass > 0 -> mass
-        _ -> nil
-      end
-
-    fuel =
-      if mass && !path_error do
-        try do
-          Calculator.total_fuel(mass, path)
-        rescue
-          # Float overflow; depends on the path too, since fuel compounds per step.
-          ArithmeticError -> :overflow
-        end
-      end
-
-    mass_errors =
-      cond do
-        fuel == :overflow -> ["is too large"]
-        mass || socket.assigns.mass == "" -> []
-        true -> ["must be a positive number"]
+        {mass, ""} when mass > @max_mass -> {nil, ["must be at most #{@max_mass}"]}
+        {mass, ""} when mass > 0 -> {mass, []}
+        _ when mass == "" -> {nil, []}
+        _ -> {nil, ["must be a positive number"]}
       end
 
     assign(socket,
       mass_errors: mass_errors,
       path_error: path_error,
-      fuel: fuel != :overflow && fuel
+      fuel: mass && !path_error && Calculator.total_fuel(mass, path)
     )
   end
 
@@ -110,7 +103,11 @@ defmodule FuelWeb.FuelLive do
     action && planet && {action, planet}
   end
 
-  defp options(values), do: Enum.map(values, &{&1 |> Atom.to_string() |> String.capitalize(), &1})
+  defp options(values), do: Enum.map(values, &{label(&1), &1})
+
+  defp label(:launch), do: "🚀 Launch"
+  defp label(:land), do: "🪂 Land"
+  defp label(value), do: value |> Atom.to_string() |> String.capitalize()
 
   @impl true
   def render(assigns) do
@@ -126,6 +123,7 @@ defmodule FuelWeb.FuelLive do
           value={@mass}
           errors={@mass_errors}
           min="0"
+          max={@max_mass}
           step="any"
         />
 
@@ -134,6 +132,7 @@ defmodule FuelWeb.FuelLive do
           <.input
             type="select"
             name={"steps[#{i}][action]"}
+            aria-label={"Step #{i + 1} action"}
             value={step["action"]}
             options={options(Calculator.actions())}
             prompt="Action"
@@ -141,17 +140,30 @@ defmodule FuelWeb.FuelLive do
           <.input
             type="select"
             name={"steps[#{i}][planet]"}
+            aria-label={"Step #{i + 1} planet"}
             value={step["planet"]}
             options={options(Calculator.planets())}
             prompt="Planet"
           />
-          <.button type="button" phx-click="remove" phx-value-index={i} aria-label="Remove step">
+          <.button
+            type="button"
+            phx-click="remove"
+            phx-value-index={i}
+            aria-label={"Remove step #{i + 1}"}
+          >
             <.icon name="hero-trash" />
           </.button>
         </div>
 
         <p :if={@path_error} id="path-error" class="text-error text-sm">{@path_error}</p>
-        <.button type="button" phx-click="add" class="mt-2">Add step</.button>
+        <.button
+          type="button"
+          phx-click="add"
+          class="mt-2"
+          disabled={length(@steps) >= @max_steps}
+        >
+          Add step
+        </.button>
       </form>
 
       <p id="total" class="mt-8 text-2xl font-semibold">
