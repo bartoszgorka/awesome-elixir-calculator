@@ -13,14 +13,21 @@ defmodule FuelWeb.FuelLive do
   end
 
   @impl true
-  def handle_event("change", params, socket) do
+  def handle_event("change", %{} = params, socket) do
     steps =
-      params
-      |> Map.get("steps", %{})
-      |> Enum.sort_by(fn {index, _} -> String.to_integer(index) end)
-      |> Enum.map(fn {_, step} -> step end)
+      case params["steps"] do
+        %{} = steps ->
+          for {index, step} <- steps, {i, ""} <- [Integer.parse(index)] do
+            {i, %{"action" => field(step, "action"), "planet" => field(step, "planet")}}
+          end
+          |> Enum.sort()
+          |> Enum.map(fn {_, step} -> step end)
 
-    {:noreply, socket |> assign(mass: params["mass"], steps: steps) |> calculate()}
+        _ ->
+          []
+      end
+
+    {:noreply, socket |> assign(mass: field(params, "mass"), steps: steps) |> calculate()}
   end
 
   def handle_event("add", _params, socket) do
@@ -28,10 +35,28 @@ defmodule FuelWeb.FuelLive do
     {:noreply, socket |> assign(steps: steps) |> calculate()}
   end
 
-  def handle_event("remove", %{"index" => index}, socket) do
-    steps = List.delete_at(socket.assigns.steps, String.to_integer(index))
-    {:noreply, socket |> assign(steps: steps) |> calculate()}
+  def handle_event("remove", %{"index" => index}, socket) when is_binary(index) do
+    case Integer.parse(index) do
+      {i, ""} when i >= 0 ->
+        steps = List.delete_at(socket.assigns.steps, i)
+        {:noreply, socket |> assign(steps: steps) |> calculate()}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
+
+  # Malformed or unknown events from the client are ignored instead of crashing the view.
+  def handle_event(_event, _params, socket), do: {:noreply, socket}
+
+  defp field(%{} = params, key) do
+    case params[key] do
+      value when is_binary(value) -> value
+      _ -> ""
+    end
+  end
+
+  defp field(_params, _key), do: ""
 
   defp calculate(socket) do
     %{mass: mass, steps: steps} = socket.assigns
@@ -55,11 +80,27 @@ defmodule FuelWeb.FuelLive do
         _ -> nil
       end
 
+    fuel =
+      if mass && !path_error do
+        try do
+          Calculator.total_fuel(mass, path)
+        rescue
+          # Float overflow; depends on the path too, since fuel compounds per step.
+          ArithmeticError -> :overflow
+        end
+      end
+
+    mass_errors =
+      cond do
+        fuel == :overflow -> ["is too large"]
+        mass || socket.assigns.mass == "" -> []
+        true -> ["must be a positive number"]
+      end
+
     assign(socket,
-      mass_errors:
-        if(mass || socket.assigns.mass == "", do: [], else: ["must be a positive number"]),
+      mass_errors: mass_errors,
       path_error: path_error,
-      fuel: mass && !path_error && Calculator.total_fuel(mass, path)
+      fuel: fuel != :overflow && fuel
     )
   end
 
